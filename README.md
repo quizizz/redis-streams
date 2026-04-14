@@ -1,19 +1,20 @@
 # @quizizz/redis-streams
 
-Redis Streams transport library — producer, consumer, and dual-transport routing layer.
+Redis Streams transport library — dual-transport routing between a legacy broker (RabbitMQ) and Redis Streams, with per-instance autoDelete and consumer group support.
 
 ## Install
 
 ```bash
-# From a consuming repo (game-socket, game-service, etc.)
 npm install @quizizz/redis-streams
-# or link locally during development
-npm link ../redis-streams
 ```
 
-Requires `redis@^4` as a peer dependency (must be installed in the consuming repo).
+This package lists `redis@^4` as a peer dependency. If your project doesn't already have it, install it explicitly:
 
-## Quick Start
+```bash
+npm install redis@^4
+```
+
+## Usage
 
 ```js
 const {
@@ -25,10 +26,10 @@ const {
 const redis = new RedisClient('my-svc', { host: 'localhost', port: 6379 }, { logger });
 await redis.init();
 
-// 2. Define stream configs
+// 2. Define stream configs and create consumer groups
 const configs = [
   { topic: `reply-${podId}`, streamMode: STREAM_MODE.SINGLE, ttlSeconds: 300 },
-  { topic: 'broadcast', streamMode: STREAM_MODE.GROUP, group: 'cg:app', consumer: podId },
+  { topic: 'broadcast',      streamMode: STREAM_MODE.GROUP, group: 'cg:app', consumer: podId },
 ];
 await createStreamGroups(configs, redis.client);
 
@@ -42,38 +43,25 @@ const transport = new StreamTransport({
   logger,
 });
 
-// 4. Subscribe (wires up both broker + streams)
+// Subscribe (wires up broker + streams in one call)
 await transport.subscribe('broadcast', handler);
 
-// 5. Send (routes based on shouldUseStreams)
-transport.send('request-topic', { api: 'join', data: {} }, opts, meta);
+// Send (routes based on shouldUseStreams)
+transport.send('request-topic', { api: 'join' }, opts, meta);
 ```
 
 ## Logger
 
-All classes accept an optional `logger` with `info(msg, meta)` and `error(msg, meta)` methods.
-
-Falls back to:
-- Legacy `.infoj()` / `.errorj()` loggers (auto-adapted)
-- Silent noop if nothing is passed
+Accepts `{ info, error }` or legacy `{ infoj, errorj }`. Defaults to a silent noop.
 
 ## API
 
-### `RedisClient(name, config, opts?)`
-Redis v4 wrapper with cluster/sentinel/single support and retry strategy.
-
-### `StreamProducer(redisClient, opts?)`
-XADD with MAXLEN trimming. Single `payload` field per entry.
-
-### `StreamConsumer(redisClient, opts?)`
-XREAD / XREADGROUP with PEL reclaimer and autoDelete (EXPIRE on SINGLE-mode streams).
-
-### `StreamTransport(options)`
-Routes between a legacy broker and Redis Streams. Resolves consumer pattern (XREAD vs XREADGROUP) from `streamConfigs`.
-
-### `createStreamGroups(configs, redisClient)`
-Idempotent XGROUP CREATE for all GROUP-mode configs.
-
-### Constants
-- `STREAM_MODE.SINGLE` / `STREAM_MODE.GROUP`
-- `DEFAULTS` — tunable block/count/ttl/PEL values
+| Export | Description |
+|--------|-------------|
+| `RedisClient(name, config, opts?)` | Redis v4 client wrapper (single / cluster / sentinel) |
+| `StreamProducer(client, opts?)` | XADD with MAXLEN trimming |
+| `StreamConsumer(client, opts?)` | XREAD / XREADGROUP with PEL reclaim and autoDelete |
+| `StreamTransport(options)` | Routes send/subscribe between broker and streams |
+| `createStreamGroups(configs, client)` | Idempotent XGROUP CREATE for GROUP-mode configs |
+| `STREAM_MODE` | `SINGLE` \| `GROUP` |
+| `DEFAULTS` | Tunable constants (block ms, count, TTL, PEL intervals) |
