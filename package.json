@@ -1,0 +1,23 @@
+{
+  "name": "@quizizz/redis-streams",
+  "version": "1.0.0",
+  "description": "Redis Streams transport library — producer, consumer, and dual-transport routing layer",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=16"
+  },
+  "peerDependencies": {
+    "redis": "^4.0.0"
+  },
+  "files": [
+    "src/"
+  ],
+  "keywords": [
+    "redis",
+    "streams",
+    "transport",
+    "messaging"
+  ],
+  "license": "UNLICENSED",
+  "private": true
+}
