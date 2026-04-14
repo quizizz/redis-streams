@@ -5,7 +5,7 @@ Redis Streams transport library — dual-transport routing between a legacy brok
 ## Install
 
 ```bash
-npm install @quizizz/redis-streams
+npm install github:quizizz/redis-streams
 ```
 
 This package lists `redis@^4` as a peer dependency. If your project doesn't already have it, install it explicitly:
