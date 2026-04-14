@@ -1,7 +1,8 @@
 'use strict';
 
 const { createClient, createCluster } = require('redis');
-const { normaliseLogger } = require('./logger');
+
+const NOOP_EMITTER = { emit() {} };
 
 function retryStrategy(retries) {
   if (retries > 1000) return new Error('redis-streams: exceeded 1000 retries');
@@ -15,23 +16,27 @@ function buildUrl(host, port, auth) {
 
 /**
  * Redis v4 client wrapper with single / cluster / sentinel support.
+ * Uses an EventEmitter for logging — compatible with @quizizz/mongo's convention.
+ *
+ * Emits:
+ *   'log'     { service, message, data }  — informational
+ *   'error'   { service, data, err }      — errors
  *
  * @example
- *   const redis = new RedisClient('my-svc', { host, port }, { logger });
+ *   const redis = new RedisClient('my-svc', emitter, { host, port });
  *   await redis.init();
  *   redis.client.xAdd(...);
  *   await redis.quit();
  */
 class RedisClient {
   /**
-   * @param {string} name    - label for log messages
-   * @param {object} config  - { host, port, db?, auth?, cluster?, sentinel? }
-   * @param {object} [opts]
-   * @param {Logger} [opts.logger]
+   * @param {string}       name     - label for log messages
+   * @param {EventEmitter} emitter  - emits 'log' and 'error' events
+   * @param {object}       config   - { host, port, db?, auth?, cluster?, sentinel? }
    */
-  constructor(name, config, opts = {}) {
+  constructor(name, emitter, config) {
     this.name = name;
-    this._log = normaliseLogger(opts.logger);
+    this.emitter = emitter || NOOP_EMITTER;
     this.config = {
       host: 'localhost',
       port: 6379,
@@ -43,6 +48,14 @@ class RedisClient {
     };
     /** @type {import('redis').RedisClientType|null} */
     this.client = null;
+  }
+
+  log(message, data) {
+    this.emitter.emit('log', { service: this.name, message, data });
+  }
+
+  error(err, data) {
+    this.emitter.emit('error', { service: this.name, data, err });
   }
 
   /**
@@ -65,7 +78,7 @@ class RedisClient {
         client = createCluster({ rootNodes, defaults });
       } else if (sentinel.use) {
         mode = 'SENTINEL';
-        const sentinelOpts = {
+        const opts = {
           sentinel: {
             name: sentinel.name,
             sentinelRootNodes: sentinel.hosts.map((h) => ({ host: h.host, port: h.port })),
@@ -73,8 +86,8 @@ class RedisClient {
           database: db,
           socket: { reconnectStrategy: retryStrategy },
         };
-        if (auth.use) sentinelOpts.password = auth.password;
-        client = createClient(sentinelOpts);
+        if (auth.use) opts.password = auth.password;
+        client = createClient(opts);
       } else {
         mode = 'SINGLE';
         client = createClient({
@@ -84,15 +97,15 @@ class RedisClient {
         });
       }
 
-      client.on('error', (err) => this._log.error('RedisClient: connection error', { name: this.name, error: err.message }));
+      client.on('error', (err) => this.error(err, { mode }));
       client.on('ready', () => {
-        this._log.info('RedisClient: connected', { name: this.name, mode });
+        this.log(`Connected in ${mode} mode`, { mode });
         this.client = client;
         resolve(this);
       });
 
       client.connect().catch((err) => {
-        this._log.error('RedisClient: initial connect failed', { name: this.name, error: err.message });
+        this.error(err, { mode, phase: 'connect' });
         reject(err);
       });
     });

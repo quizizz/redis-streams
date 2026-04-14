@@ -1,7 +1,8 @@
 'use strict';
 
 const { DEFAULTS } = require('./constants');
-const { normaliseLogger } = require('./logger');
+
+const NOOP_EMITTER = { emit() {} };
 
 /**
  * Produces messages to Redis Streams via XADD.
@@ -10,18 +11,17 @@ const { normaliseLogger } = require('./logger');
  * into a single `payload` field. StreamConsumer parses it back.
  *
  * @example
- *   const producer = new StreamProducer(redisClient, { logger });
+ *   const producer = new StreamProducer(redisClient, emitter);
  *   await producer.send('stream:topic', content, { correlationId }, meta);
  */
 class StreamProducer {
   /**
    * @param {import('redis').RedisClientType} redisClient
-   * @param {object} [opts]
-   * @param {Logger} [opts.logger]
+   * @param {EventEmitter} emitter - emits 'error' events
    */
-  constructor(redisClient, opts = {}) {
+  constructor(redisClient, emitter) {
     this._client = redisClient;
-    this._log = normaliseLogger(opts.logger);
+    this._emitter = emitter || NOOP_EMITTER;
   }
 
   /**

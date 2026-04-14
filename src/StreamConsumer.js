@@ -1,19 +1,23 @@
 'use strict';
 
 const { DEFAULTS } = require('./constants');
-const { normaliseLogger } = require('./logger');
+
+const NOOP_EMITTER = { emit() {} };
+const SERVICE_NAME = 'StreamConsumer';
 
 /**
- * Consumes messages from Redis Streams via XREAD (single reader) or
- * XREADGROUP (consumer group).
+ * Consumes messages from Redis Streams via XREAD (single reader) or XREADGROUP (consumer group).
  *
  * Parses each entry into: { content, correlationId, meta, redelivered, _transport, ack() }
  *
- * For per-instance streams (SINGLE mode), automatically refreshes an EXPIRE on the
- * stream key so Redis auto-deletes it if the consumer dies (autoDelete equivalent).
+ * For per-instance streams (SINGLE mode), automatically refreshes an EXPIRE on the stream key
+ * so Redis auto-deletes it if the consumer dies (autoDelete equivalent).
+ *
+ * Emits:
+ *   'error'  { service, message, data, err }  — on XREAD/XREADGROUP errors, parse failures, XACK failures
  *
  * @example
- *   const consumer = new StreamConsumer(redisClient, { logger });
+ *   const consumer = new StreamConsumer(redisClient, emitter);
  *   consumer.subscribe('stream:reply-abc', handler, { ttlSeconds: 300 });
  *   consumer.subscribe('stream:broadcast', handler, { group: 'cg:app', consumer: 'pod-1' });
  *   await consumer.stop();
@@ -21,14 +25,17 @@ const { normaliseLogger } = require('./logger');
 class StreamConsumer {
   /**
    * @param {import('redis').RedisClientType} redisClient
-   * @param {object} [opts]
-   * @param {Logger} [opts.logger]
+   * @param {EventEmitter} emitter - emits 'error' events
    */
-  constructor(redisClient, opts = {}) {
+  constructor(redisClient, emitter) {
     this._client = redisClient;
-    this._log = normaliseLogger(opts.logger);
+    this._emitter = emitter || NOOP_EMITTER;
     this._running = false;
     this._pelTimers = [];
+  }
+
+  _error(message, data = {}) {
+    this._emitter.emit('error', { service: SERVICE_NAME, message, data });
   }
 
   /**
@@ -71,7 +78,6 @@ class StreamConsumer {
     let lastTtlRefresh = 0;
 
     while (this._running) {
-      // autoDelete: refresh EXPIRE while alive
       const now = Date.now();
       if (now - lastTtlRefresh >= DEFAULTS.TTL_REFRESH_INTERVAL_MS) {
         await this._client.expire(streamName, ttlSeconds).catch(() => {});
@@ -93,7 +99,7 @@ class StreamConsumer {
         }
       } catch (err) {
         if (!this._running) break;
-        this._log.error('StreamConsumer: XREAD error', { stream: streamName, error: err.message });
+        this._error('XREAD error', { stream: streamName, error: err.message });
         await _sleep(1000);
       }
     }
@@ -122,7 +128,7 @@ class StreamConsumer {
         }
       } catch (err) {
         if (!this._running) break;
-        this._log.error('StreamConsumer: XREADGROUP error', { stream: streamName, group, consumer, error: err.message });
+        this._error('XREADGROUP error', { stream: streamName, group, consumer, error: err.message });
         await _sleep(1000);
       }
     }
@@ -145,7 +151,7 @@ class StreamConsumer {
         }
       } catch (err) {
         if (!err.message?.includes('NOGROUP')) {
-          this._log.error('StreamConsumer: XAUTOCLAIM error', { stream: streamName, group, error: err.message });
+          this._error('XAUTOCLAIM error', { stream: streamName, group, error: err.message });
         }
       }
     }, DEFAULTS.PEL_INTERVAL_MS);
@@ -159,7 +165,7 @@ class StreamConsumer {
     try {
       await handler(msg);
     } catch (err) {
-      this._log.error('StreamConsumer: handler error', { stream: streamName, entryId: entry.id, error: err.message });
+      this._error('Handler error', { stream: streamName, entryId: entry.id, error: err.message });
     }
   }
 
@@ -168,13 +174,13 @@ class StreamConsumer {
     try {
       parsed = JSON.parse(entry.message.payload);
     } catch {
-      this._log.error('StreamConsumer: payload parse error', { stream: streamName, entryId: entry.id });
+      this._error('Payload parse error', { stream: streamName, entryId: entry.id });
       parsed = {};
     }
 
     const entryId = entry.id;
     const client = this._client;
-    const log = this._log;
+    const emitter = this._emitter;
 
     return {
       content: {},
@@ -187,7 +193,11 @@ class StreamConsumer {
       ack() {
         if (!group) return Promise.resolve();
         return client.xAck(streamName, group, entryId).catch((err) => {
-          log.error('StreamConsumer: XACK error', { stream: streamName, group, entryId, error: err.message });
+          emitter.emit('error', {
+            service: SERVICE_NAME,
+            message: 'XACK error',
+            data: { stream: streamName, group, entryId, error: err.message },
+          });
         });
       },
     };

@@ -1,11 +1,13 @@
 'use strict';
 
 const { STREAM_MODE } = require('./constants');
-const { normaliseLogger } = require('./logger');
+
+const NOOP_EMITTER = { emit() {} };
+const SERVICE_NAME = 'StreamTransport';
 
 /**
- * Unified transport that routes between a legacy broker (RabbitMQ, SQS, etc.)
- * and Redis Streams, based on a caller-provided routing function.
+ * Unified transport that routes between a legacy broker (RabbitMQ etc.) and Redis Streams,
+ * based on a caller-provided routing function.
  *
  * Broker-agnostic — the broker just needs `.send()` and `.subscribe()`.
  *
@@ -19,25 +21,24 @@ const { normaliseLogger } = require('./logger');
  *       { topic: `reply-${podId}`, streamMode: STREAM_MODE.SINGLE, ttlSeconds: 300 },
  *     ],
  *     shouldUseStreams: (apiName) => featureFlags.isWhitelisted(apiName),
- *     logger,
+ *     emitter,
  *   });
  */
 class StreamTransport {
   /**
-   * @param {object} options
    * @param {object}          options.broker            - legacy broker (must have send/subscribe)
    * @param {StreamProducer}  [options.streamProducer]   - null = streams disabled
    * @param {StreamConsumer}  [options.streamConsumer]   - null = streams disabled
    * @param {StreamConfig[]}  [options.streamConfigs]    - per-topic mode/group/ttl config
    * @param {function}        [options.shouldUseStreams] - (apiName: string) => boolean
-   * @param {Logger}          [options.logger]
+   * @param {EventEmitter}    [options.emitter]
    */
   constructor(options) {
     this._broker = options.broker;
     this._streamProducer = options.streamProducer || null;
     this._streamConsumer = options.streamConsumer || null;
     this._shouldUseStreamsFn = options.shouldUseStreams || (() => false);
-    this._log = normaliseLogger(options.logger);
+    this._emitter = options.emitter || NOOP_EMITTER;
 
     this._streamConfigMap = new Map(
       (options.streamConfigs || []).map((c) => [c.topic, c]),
@@ -81,7 +82,6 @@ class StreamTransport {
 
   // ── Unsubscribe ─────────────────────────────────────────────────────
 
-  /** Unsubscribe from a single broker topic using the stored consumerTag. */
   async unsubscribe(topic) {
     const result = this._brokerResults[topic];
     if (result) {
@@ -90,7 +90,6 @@ class StreamTransport {
     }
   }
 
-  /** Stop all Redis Streams consumer polling loops. */
   async stopStreams() {
     if (this._streamConsumer) {
       await this._streamConsumer.stop();
