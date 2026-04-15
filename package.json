@@ -6,8 +6,8 @@
   "engines": {
     "node": ">=16"
   },
-  "peerDependencies": {
-    "redis": "^5.0.0"
+  "dependencies": {
+    "redis": "5.12.1"
   },
   "files": [
     "src/"
