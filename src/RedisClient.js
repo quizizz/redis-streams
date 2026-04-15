@@ -81,11 +81,13 @@ class RedisClient {
         socket: { reconnectStrategy: retryStrategy },
       };
       if (auth.use) nodeClientOptions.password = auth.password;
-      client = createSentinel({
+      const sentinelOpts = {
         name: sentinel.name,
         sentinelRootNodes: sentinel.hosts.map((h) => ({ host: h.host, port: h.port })),
         nodeClientOptions,
-      });
+      };
+      client = createSentinel(sentinelOpts);
+      client.duplicate = (overrides) => createSentinel({ ...sentinelOpts, ...overrides });
     } else {
       mode = 'SINGLE';
       client = createClient({
