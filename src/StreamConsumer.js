@@ -126,14 +126,16 @@ class StreamConsumer {
         });
         if (!response) continue;
 
+        const dispatches = [];
         for (const stream of response) {
           const sub = this._readSubs.get(stream.name);
           if (!sub) continue;
           for (const entry of stream.messages) {
             sub.lastId = entry.id;
-            this._dispatch(entry, stream.name, null, false, sub.handler);
+            dispatches.push(this._dispatch(entry, stream.name, null, false, sub.handler));
           }
         }
+        await Promise.all(dispatches);
       } catch (err) {
         if (!this._running) break;
         this._error('XREAD error', { error: err.message });
@@ -202,11 +204,13 @@ class StreamConsumer {
         );
         if (!response) continue;
 
+        const dispatches = [];
         for (const stream of response) {
           for (const entry of stream.messages) {
-            this._dispatch(entry, streamName, group, false, handler);
+            dispatches.push(this._dispatch(entry, streamName, group, false, handler));
           }
         }
+        await Promise.all(dispatches);
       } catch (err) {
         if (!this._running) break;
         this._error('XREADGROUP error', { stream: streamName, group, consumer, error: err.message });
@@ -257,10 +261,10 @@ class StreamConsumer {
 
   // ── Dispatch ─────────────────────────────────────────────────────────
 
-  _dispatch(entry, streamName, group, redelivered, handler) {
+  async _dispatch(entry, streamName, group, redelivered, handler) {
     const msg = this._parseEntry(entry, streamName, group, redelivered);
     try {
-      handler(msg);
+      await handler(msg);
     } catch (err) {
       this._error('Handler error', { stream: streamName, entryId: entry.id, error: err.message });
     }
