@@ -110,6 +110,22 @@ class RedisClient {
     }
   }
 
+  /**
+   * Create a new connected client with the same config and error handling.
+   * Use for operations that need a dedicated connection (blocking commands, pub/sub).
+   *
+   * @param {string} [label] - suffix for log messages (e.g. 'xread', 'pubsub')
+   * @returns {Promise<import('redis').RedisClientType>} connected raw client
+   */
+  async duplicate(label) {
+    const suffix = label ? `-${label}` : '';
+    const client = this.client.duplicate();
+    client.on('error', (err) => this.error(err, { mode: `duplicate${suffix}` }));
+    await client.connect();
+    this.log(`Duplicate connected${suffix ? ` (${label})` : ''}`, { label });
+    return client;
+  }
+
   /** Graceful close — waits for pending commands. */
   async close() {
     if (this.client) { await this.client.close(); this.client = null; }

@@ -17,11 +17,12 @@ const STREAM_MODE = Object.freeze({
 /** Tunable defaults. Override per-call or per-subscription via options. */
 const DEFAULTS = Object.freeze({
   BLOCK_MS: 5000,
-  COUNT: 100,
+  COUNT: 1,
   MAX_LEN: 10000,
   PEL_INTERVAL_MS: 30000,
   PEL_MIN_IDLE_MS: 60000,
   PEL_COUNT: 100,
+  MAX_DELIVERY_COUNT: 5,
   STREAM_TTL_SECONDS: 300,
   TTL_REFRESH_INTERVAL_MS: 60 * 1000,
 });
