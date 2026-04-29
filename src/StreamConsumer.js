@@ -135,7 +135,7 @@ class StreamConsumer {
             dispatches.push(this._dispatch(entry, stream.name, null, false, sub.handler));
           }
         }
-        await Promise.all(dispatches);
+        await Promise.allSettled(dispatches);
       } catch (err) {
         if (!this._running) break;
         this._error('XREAD error', { error: err.message });
@@ -210,7 +210,7 @@ class StreamConsumer {
             dispatches.push(this._dispatch(entry, streamName, group, false, handler));
           }
         }
-        await Promise.all(dispatches);
+        await Promise.allSettled(dispatches);
       } catch (err) {
         if (!this._running) break;
         this._error('XREADGROUP error', { stream: streamName, group, consumer, error: err.message });
