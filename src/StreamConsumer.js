@@ -148,9 +148,15 @@ class StreamConsumer {
     const now = Date.now();
     for (const [name, sub] of this._readSubs) {
       if (now - sub.lastTtlRefresh >= DEFAULTS.TTL_REFRESH_INTERVAL_MS) {
-        // Fire-and-forget on main client (always free, never blocked)
-        this._client.expire(name, sub.ttlSeconds).catch(() => {});
-        sub.lastTtlRefresh = now;
+        this._client.expire(name, sub.ttlSeconds)
+          .then((result) => {
+            // result = 1 (TTL set) or 0 (key doesn't exist)
+            // Only mark as refreshed if EXPIRE actually applied
+            if (result) sub.lastTtlRefresh = now;
+          })
+          .catch((err) => {
+            this._error('EXPIRE error', { stream: name, error: err.message });
+          });
       }
     }
   }
