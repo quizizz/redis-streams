@@ -74,8 +74,8 @@ class StreamTransport {
     if (this._streamConsumer) {
       const cfg = this._streamConfigMap.get(topic);
       const streamOpts = cfg?.streamMode === STREAM_MODE.GROUP
-        ? { group: cfg.group, consumer: cfg.consumer }
-        : { ttlSeconds: cfg?.ttlSeconds };
+        ? { group: cfg.group, consumer: cfg.consumer, count: cfg.count, blockMs: cfg.blockMs }
+        : { ttlSeconds: cfg?.ttlSeconds, count: cfg.count, blockMs: cfg.blockMs };
       this._streamConsumer.subscribe(`stream:${topic}`, handler, streamOpts);
     }
   }
