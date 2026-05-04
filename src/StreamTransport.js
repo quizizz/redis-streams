@@ -56,7 +56,23 @@ class StreamTransport {
     const apiName = content?.api || content?.broadcast?.api || content?.type || '';
 
     if (this._streamProducer && this._shouldUseStreamsFn(apiName)) {
-      return this._streamProducer.send(`stream:${topic}`, content, options, meta);
+      const payload = JSON.stringify({
+        content,
+        correlationId: options.correlationId || null,
+        meta,
+        replyTo: options.replyTo || null,
+      });
+
+      const cfg = this._streamConfigMap.get(topic);
+      const streamOptions = {};
+      if (options.ttlSeconds ?? cfg?.ttlSeconds) {
+        streamOptions.ttlSeconds = options.ttlSeconds ?? cfg.ttlSeconds;
+      }
+      if (options.maxLen ?? cfg?.maxLen) {
+        streamOptions.maxLen = options.maxLen ?? cfg.maxLen;
+      }
+
+      return this._streamProducer.send(`stream:${topic}`, payload, streamOptions);
     }
     return this._broker.send(topic, content, options, meta);
   }
@@ -75,7 +91,7 @@ class StreamTransport {
       const cfg = this._streamConfigMap.get(topic);
       const streamOpts = cfg?.streamMode === STREAM_MODE.GROUP
         ? { group: cfg.group, consumer: cfg.consumer, count: cfg.count, blockMs: cfg.blockMs }
-        : { ttlSeconds: cfg?.ttlSeconds, count: cfg.count, blockMs: cfg.blockMs };
+        : { count: cfg.count, blockMs: cfg.blockMs };
       this._streamConsumer.subscribe(`stream:${topic}`, handler, streamOpts);
     }
   }

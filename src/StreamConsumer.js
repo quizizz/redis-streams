@@ -18,15 +18,15 @@ const SERVICE_NAME = 'StreamConsumer';
  *   GROUP mode  — Each GROUP subscription gets its own dedicated duplicate connection for
  *                 XREADGROUP BLOCK. Includes a PEL reclaimer (xAutoClaim) with max retry.
  *
- *   Main client — Reserved exclusively for non-blocking ops: EXPIRE, XACK, XAUTOCLAIM, XPENDING.
- *                 Never blocked by any polling loop.
+ *   Main client — Reserved exclusively for non-blocking ops: XACK, XAUTOCLAIM, XPENDING.
+ *                 Never blocked by any polling loop. TTL is managed by StreamProducer.
  *
  * Emits:
  *   'error'  { service, message, data, err }  — on poll errors, parse failures, XACK failures
  *
  * @example
  *   const consumer = new StreamConsumer(redisClient, emitter);
- *   consumer.subscribe('stream:reply-abc', handler, { ttlSeconds: 300 });
+ *   consumer.subscribe('stream:reply-abc', handler);
  *   consumer.subscribe('stream:broadcast', handler, { group: 'cg:app', consumer: 'pod-1' });
  *   await consumer.stop();
  */
@@ -36,14 +36,14 @@ class StreamConsumer {
    * @param {EventEmitter} emitter
    */
   constructor(redisClient, emitter) {
-    this._client = redisClient;      // non-blocking ops only (EXPIRE, XACK, XAUTOCLAIM)
+    this._client = redisClient;      // non-blocking ops only (XACK, XAUTOCLAIM)
     this._emitter = emitter || NOOP_EMITTER;
     this._running = false;
     this._pelTimers = [];
     this._dedicatedClients = [];     // duplicate connections — closed on stop()
 
     // SINGLE mode: all subscriptions collected here, consumed by one unified XREAD loop
-    this._readSubs = new Map();      // streamName → { handler, lastId, ttlSeconds, lastTtlRefresh }
+    this._readSubs = new Map();      // streamName → { handler, lastId, count }
     this._readLoopStarted = false;
   }
 
@@ -56,7 +56,7 @@ class StreamConsumer {
   /**
    * Subscribe to a stream. Non-blocking — starts/registers consumer loops in the background.
    *
-   * SINGLE mode options: { ttlSeconds }
+   * SINGLE mode options: { count? }
    * GROUP mode options:  { group, consumer, blockMs?, count? }
    */
   subscribe(streamName, handler, options = {}) {
@@ -69,9 +69,7 @@ class StreamConsumer {
       this._readSubs.set(streamName, {
         handler,
         lastId: '$',
-        ttlSeconds: options.ttlSeconds ?? DEFAULTS.STREAM_TTL_SECONDS,
         count: options.count ?? DEFAULTS.COUNT,
-        lastTtlRefresh: 0,
       });
 
       if (!this._readLoopStarted) {
@@ -102,20 +100,21 @@ class StreamConsumer {
 
   async _startUnifiedReadLoop() {
     let readClient;
-    try {
-      readClient = this._client.duplicate();
-      readClient.on('error', (err) => this._error('readClient error', { error: err.message }));
-      await readClient.connect();
-      this._dedicatedClients.push(readClient);
-    } catch (err) {
-      this._error('readClient connect failed', { error: err.message });
-      this._readLoopStarted = false;
-      return;
+    while (this._running) {
+      try {
+        readClient = this._client.duplicate();
+        readClient.on('error', (err) => this._error('readClient error', { error: err.message }));
+        await readClient.connect();
+        this._dedicatedClients.push(readClient);
+        break;
+      } catch (err) {
+        this._error('readClient connect failed, retrying', { error: err.message });
+        await _sleep(2000);
+      }
     }
+    if (!this._running) return;
 
     while (this._running) {
-      this._refreshTTLs();
-
       const streams = this._buildReadStreams();
       if (streams.length === 0) { await _sleep(100); continue; }
 
@@ -144,23 +143,6 @@ class StreamConsumer {
     }
   }
 
-  _refreshTTLs() {
-    const now = Date.now();
-    for (const [name, sub] of this._readSubs) {
-      if (now - sub.lastTtlRefresh >= DEFAULTS.TTL_REFRESH_INTERVAL_MS) {
-        this._client.expire(name, sub.ttlSeconds)
-          .then((result) => {
-            // result = 1 (TTL set) or 0 (key doesn't exist)
-            // Only mark as refreshed if EXPIRE actually applied
-            if (result) sub.lastTtlRefresh = now;
-          })
-          .catch((err) => {
-            this._error('EXPIRE error', { stream: name, error: err.message });
-          });
-      }
-    }
-  }
-
   _buildReadStreams() {
     const streams = [];
     for (const [name, sub] of this._readSubs) {
@@ -183,15 +165,19 @@ class StreamConsumer {
 
   async _startGroupConsumer(streamName, handler, options) {
     let groupClient;
-    try {
-      groupClient = this._client.duplicate();
-      groupClient.on('error', (err) => this._error('groupClient error', { error: err.message }));
-      await groupClient.connect();
-      this._dedicatedClients.push(groupClient);
-    } catch (err) {
-      this._error('groupClient connect failed', { stream: streamName, error: err.message });
-      return;
+    while (this._running) {
+      try {
+        groupClient = this._client.duplicate();
+        groupClient.on('error', (err) => this._error('groupClient error', { error: err.message }));
+        await groupClient.connect();
+        this._dedicatedClients.push(groupClient);
+        break;
+      } catch (err) {
+        this._error('groupClient connect failed, retrying', { stream: streamName, error: err.message });
+        await _sleep(2000);
+      }
     }
+    if (!this._running) return;
 
     this._pollGroup(groupClient, streamName, handler, options);
   }
@@ -253,7 +239,7 @@ class StreamConsumer {
             continue;
           }
 
-          this._dispatch(entry, streamName, group, true, handler);
+          await this._dispatch(entry, streamName, group, true, handler);
         }
       } catch (err) {
         if (!err.message?.includes('NOGROUP')) {

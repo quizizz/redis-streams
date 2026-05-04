@@ -23,7 +23,6 @@ const DEFAULTS = Object.freeze({
   PEL_MIN_IDLE_MS: 60000,
   PEL_COUNT: 100,
   MAX_DELIVERY_COUNT: 5,
-  STREAM_TTL_SECONDS: 10 * 60, // 10 minutes
   TTL_REFRESH_INTERVAL_MS: 5 * 60 * 1000, // 5 minutes
 });
 
