@@ -45,6 +45,7 @@ class StreamConsumer {
     // SINGLE mode: all subscriptions collected here, consumed by one unified XREAD loop
     this._readSubs = new Map();      // streamName → { handler, lastId, count }
     this._readLoopStarted = false;
+    this._loopPromises = [];         // tracked for drain on stop()
   }
 
   _error(message, data = {}) {
@@ -63,7 +64,7 @@ class StreamConsumer {
     this._running = true;
 
     if (options.group && options.consumer) {
-      this._startGroupConsumer(streamName, handler, options);
+      this._loopPromises.push(this._startGroupConsumer(streamName, handler, options));
       this._startPELReclaimer(streamName, handler, options.group, options.consumer);
     } else {
       this._readSubs.set(streamName, {
@@ -74,7 +75,7 @@ class StreamConsumer {
 
       if (!this._readLoopStarted) {
         this._readLoopStarted = true;
-        this._startUnifiedReadLoop();
+        this._loopPromises.push(this._startUnifiedReadLoop());
       }
     }
   }
@@ -94,6 +95,12 @@ class StreamConsumer {
       client.destroy();
     }
     this._dedicatedClients = [];
+
+    // Wait for poll loops to finish their current batch of dispatches.
+    // Handlers can still XACK via the main client (caller must keep it alive
+    // until stop() resolves).
+    await Promise.allSettled(this._loopPromises);
+    this._loopPromises = [];
   }
 
   // ── SINGLE mode: unified multi-stream XREAD ──────────────────────────
@@ -179,7 +186,7 @@ class StreamConsumer {
     }
     if (!this._running) return;
 
-    this._pollGroup(groupClient, streamName, handler, options);
+    await this._pollGroup(groupClient, streamName, handler, options);
   }
 
   async _pollGroup(client, streamName, handler, options) {
