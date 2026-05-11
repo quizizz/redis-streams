@@ -1,0 +1,165 @@
+# Full security scan — runs on push to main and on a nightly schedule.
+#
+# Scans: Gitleaks (secrets), Grype (dependencies), Semgrep (SAST)
+# Artifacts uploaded to S3.
+
+name: Security Full Scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  id-token: write
+
+jobs:
+  security-full:
+    name: Secrets + Dependencies + SAST (full)
+    runs-on: arc-runner-set-security-scan
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::399771530480:role/github-actions-security-scan
+          aws-region: us-east-1
+
+      - name: Set S3 artifact prefix
+        run: |
+          REPO="${GITHUB_REPOSITORY#*/}"
+          REF_NAME="${GITHUB_REF_NAME}"
+          echo "SCAN_S3_PREFIX=security-scans/${REPO}/github-actions/ref-${REF_NAME}/run-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --break-system-packages semgrep==1.154.0 requests==2.33.1 codeowners==0.8.0
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
+      # ── Secrets: Gitleaks (full working-tree scan) ───────────────────────────
+      - name: Secrets (Gitleaks)
+        run: |
+          set -o pipefail
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.0/gitleaks_8.18.0_linux_x64.tar.gz \
+            -o /tmp/gitleaks.tar.gz
+          echo "6e19050a3ee0688265ed3be4c46a0362487d20456ecd547e8c7328eaed3980cb  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar xz -C /tmp -f /tmp/gitleaks.tar.gz
+          /tmp/gitleaks detect \
+            --source . \
+            --no-git \
+            --verbose \
+            --config .gitleaks.toml \
+            --report-format json \
+            --report-path gitleaks-results.json 2>&1 | tee gitleaks-cli.txt
+          rc="${PIPESTATUS[0]}"
+          if [ -f gitleaks-results.json ] && command -v jq >/dev/null; then
+            {
+              echo ""
+              echo "=== Findings ==="
+              jq -r '.[] | [.RuleID, "\(.File):\(.StartLine // "")", .Description] | @tsv' \
+                gitleaks-results.json 2>/dev/null || echo "(none)"
+            } >> gitleaks-cli.txt
+          fi
+          exit "$rc"
+
+      - name: Upload Gitleaks results to S3
+        if: always() && (hashFiles('gitleaks-results.json') != '' || hashFiles('gitleaks-cli.txt') != '')
+        run: |
+          [ -f gitleaks-results.json ] && aws s3 cp gitleaks-results.json \
+            "s3://quizizz-platform/${SCAN_S3_PREFIX}/gitleaks-results.json" \
+            --content-type "application/json"
+          [ -f gitleaks-cli.txt ] && aws s3 cp gitleaks-cli.txt \
+            "s3://quizizz-platform/${SCAN_S3_PREFIX}/gitleaks-cli.txt" \
+            --content-type "text/plain; charset=utf-8"
+
+      # ── Dependencies: Grype (full scan) ─────────────────────────────────────
+      - name: Dependencies (Grype)
+        if: always()
+        id: grype_scan
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+        with:
+          path: "."
+          config: .grype.yaml
+          fail-build: true
+          severity-cutoff: high
+          output-format: json
+          output-file: grype-results.json
+          grype-version: v0.110.0
+
+      - name: Build Grype HTML report
+        if: always() && hashFiles('grype-results.json') != ''
+        run: |
+          python3 scripts/security/grype-to-html.py \
+            --input grype-results.json \
+            --html  grype-report.html
+
+      - name: Upload Grype results to S3
+        if: always()
+        run: |
+          [ -f grype-results.json ] && aws s3 cp grype-results.json \
+            "s3://quizizz-platform/${SCAN_S3_PREFIX}/grype-results.json" \
+            --content-type "application/json"
+          [ -f grype-report.html ] && aws s3 cp grype-report.html \
+            "s3://quizizz-platform/${SCAN_S3_PREFIX}/grype-report.html" \
+            --content-type "text/html; charset=utf-8"
+
+      # ── Grype → Plane ───────────────────────────────────────────────────────
+      - name: Push Grype findings to Plane
+        if: always() && hashFiles('grype-results.json') != ''
+        env:
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+        run: |
+          python3 scripts/security/grype-to-plane.py \
+            --input grype-results.json \
+            --repo  "${GITHUB_REPOSITORY#*/}"
+
+      # ── SAST: Semgrep (full scan, no baseline) ───────────────────────────────
+      - name: SAST (Semgrep)
+        if: always()
+        run: |
+          semgrep scan \
+            --config auto \
+            --config p/security-audit \
+            --error \
+            --text-output=semgrep-cli.txt \
+            --json-output=semgrep-results.json \
+            --sarif-output=semgrep.sarif
+
+      - name: Build Semgrep HTML report
+        if: always() && hashFiles('semgrep.sarif') != ''
+        run: |
+          python3 scripts/security/sarif-to-html.py \
+            --input semgrep.sarif \
+            --json-input semgrep-results.json \
+            --html semgrep-report.html
+
+      - name: Upload Semgrep results to S3
+        if: always()
+        run: |
+          [ -f semgrep.sarif ]        && aws s3 cp semgrep.sarif         "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-results.sarif" --content-type "application/sarif+json"
+          [ -f semgrep-results.json ] && aws s3 cp semgrep-results.json  "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-results.json"  --content-type "application/json"
+          [ -f semgrep-cli.txt ]      && aws s3 cp semgrep-cli.txt       "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-cli.txt"       --content-type "text/plain; charset=utf-8"
+          [ -f semgrep-report.html ]         && aws s3 cp semgrep-report.html         "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-report.html"         --content-type "text/html; charset=utf-8"
+
+      # ── Semgrep → Plane ─────────────────────────────────────────────────────
+      - name: Push Semgrep findings to Plane
+        if: always() && hashFiles('semgrep.sarif') != ''
+        env:
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+        run: |
+          python3 scripts/security/semgrep-to-plane.py \
+            --input semgrep.sarif \
+            --json-input semgrep-results.json \
+            --repo  "${GITHUB_REPOSITORY#*/}" \
+            --codeowners .github/CODEOWNERS \
+            --default-owner "@quizizz/schools-backend-team"

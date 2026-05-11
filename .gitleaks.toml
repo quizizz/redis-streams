@@ -1,0 +1,3 @@
+title = "CASA Gitleaks"
+# No allowlists — .env* files are committed in this repo but should contain
+# only VITE_* build config. Scanning them catches accidental secret commits.
