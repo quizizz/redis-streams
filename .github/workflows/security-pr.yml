@@ -1,0 +1,185 @@
+# PR-gate security scan — diff-aware, blocks merge on net-new findings only.
+#
+# What this does:
+#   - Gitleaks: scans only commits introduced by this PR (--log-opts BASE..HEAD)
+#   - Grype:    scans PR branch, diffs against base branch, fails on net-new high+
+#   - Semgrep:  uses --baseline-commit so only findings in changed lines are reported
+#
+# What this does NOT do:
+#   - Push findings to Plane (that is the full scan's job)
+#   - Re-report pre-existing findings already on the board
+#
+# Exclusion policy:
+#   Developers cannot bypass this check themselves.  If a PR must merge despite a new
+#   finding, an admin performs a bypass merge.  The finding then surfaces on the Plane
+#   board via the next scheduled full scan and the codeowner must document justification
+#   on the Plane issue.
+
+name: Security PR Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  id-token: write
+
+jobs:
+  security-pr:
+    name: Secrets + Dependencies + SAST (PR diff)
+    runs-on: arc-runner-set-security-scan
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::399771530480:role/github-actions-security-scan
+          aws-region: us-east-1
+
+      - name: Set S3 artifact prefix
+        run: |
+          REPO="${GITHUB_REPOSITORY#*/}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          echo "SCAN_S3_PREFIX=security-scans/${REPO}/github-actions/pr-${PR_NUMBER}/run-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+          # Use merge-base so findings introduced by merging main into the branch
+          # are not reported as new — only changes authored on this branch are scanned.
+          BASE_SHA=$(git merge-base HEAD origin/${{ github.event.pull_request.base.ref }})
+          echo "BASE_SHA=${BASE_SHA}" >> "$GITHUB_ENV"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --break-system-packages semgrep==1.154.0
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
+
+      # ── Secrets: Gitleaks (PR commits only) ─────────────────────────────────
+      - name: Secrets (Gitleaks — PR commits only)
+        run: |
+          set -o pipefail
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.0/gitleaks_8.18.0_linux_x64.tar.gz \
+            -o /tmp/gitleaks.tar.gz
+          echo "6e19050a3ee0688265ed3be4c46a0362487d20456ecd547e8c7328eaed3980cb  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar xz -C /tmp -f /tmp/gitleaks.tar.gz
+          # --log-opts scans only commits introduced by this PR, not the whole history
+          /tmp/gitleaks detect \
+            --source . \
+            --log-opts "$BASE_SHA..HEAD" \
+            --verbose \
+            --config .gitleaks.toml \
+            --report-format json \
+            --report-path gitleaks-results.json 2>&1 | tee gitleaks-cli.txt
+          rc="${PIPESTATUS[0]}"
+          if [ -f gitleaks-results.json ] && command -v jq >/dev/null; then
+            {
+              echo ""
+              echo "=== Findings (PR commits only) ==="
+              jq -r '.[] | [.RuleID, "\(.File):\(.StartLine // "")", .Description] | @tsv' \
+                gitleaks-results.json 2>/dev/null || echo "(none)"
+            } >> gitleaks-cli.txt
+          fi
+          exit "$rc"
+
+      - name: Upload Gitleaks results to S3
+        if: always() && (hashFiles('gitleaks-results.json') != '' || hashFiles('gitleaks-cli.txt') != '')
+        run: |
+          [ -f gitleaks-results.json ] && aws s3 cp gitleaks-results.json \
+            "s3://quizizz-platform/${SCAN_S3_PREFIX}/gitleaks-results.json" \
+            --content-type "application/json"
+          [ -f gitleaks-cli.txt ] && aws s3 cp gitleaks-cli.txt \
+            "s3://quizizz-platform/${SCAN_S3_PREFIX}/gitleaks-cli.txt" \
+            --content-type "text/plain; charset=utf-8"
+
+      # ── Dependencies: Grype (diff against base branch) ──────────────────────
+      - name: Grype — baseline scan (base branch)
+        if: always()
+        run: |
+          git worktree add /tmp/base-checkout "$BASE_SHA" 2>/dev/null || true
+          if [ -d /tmp/base-checkout ]; then
+            docker run --rm \
+              -v "/tmp/base-checkout:/src" \
+              anchore/grype@sha256:af65fbc0c664691067788fe95ff88760b435543e45595eb2ca6f102fc476fbe1 \
+              dir:/src \
+              --config /src/.grype.yaml \
+              -o json \
+              --file /src/grype-baseline.json || true
+            [ -f /tmp/base-checkout/grype-baseline.json ] && cp /tmp/base-checkout/grype-baseline.json grype-baseline.json
+            git worktree remove /tmp/base-checkout --force 2>/dev/null || true
+          fi
+          [ -f grype-baseline.json ] || echo '{"matches":[]}' > grype-baseline.json
+
+      - name: Grype — PR scan
+        if: always()
+        id: grype_pr
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7
+        with:
+          path: "."
+          config: .grype.yaml
+          fail-build: false          # grype-diff.py handles the fail decision
+          output-format: json
+          output-file: grype-pr.json
+          grype-version: v0.110.0
+
+      - name: Grype — diff and fail on net-new high+ findings
+        if: always()
+        run: |
+          python3 scripts/security/grype-diff.py diff \
+            --baseline grype-baseline.json \
+            --pr       grype-pr.json \
+            --output   grype-diff.json
+          python3 scripts/security/grype-diff.py check \
+            --input    grype-diff.json \
+            --severity high
+
+      - name: Build Grype diff HTML report
+        if: always() && hashFiles('grype-diff.json') != ''
+        run: |
+          python3 scripts/security/grype-to-html.py \
+            --input grype-diff.json \
+            --html  grype-diff-report.html
+
+      - name: Upload Grype results to S3
+        if: always()
+        run: |
+          for f in grype-baseline.json grype-pr.json grype-diff.json; do
+            [ -f "$f" ] && aws s3 cp "$f" \
+              "s3://quizizz-platform/${SCAN_S3_PREFIX}/${f}" \
+              --content-type "application/json"
+          done
+          [ -f grype-diff-report.html ] && aws s3 cp grype-diff-report.html \
+            "s3://quizizz-platform/${SCAN_S3_PREFIX}/grype-diff-report.html" \
+            --content-type "text/html; charset=utf-8"
+
+      # ── SAST: Semgrep (changed lines only) ──────────────────────────────────
+      - name: SAST (Semgrep — diff against base branch)
+        if: always()
+        run: |
+          semgrep scan \
+            --config auto \
+            --config p/security-audit \
+            --error \
+            --baseline-commit "$BASE_SHA" \
+            --text-output=semgrep-cli.txt \
+            --json-output=semgrep-results.json \
+            --sarif-output=semgrep.sarif
+
+      - name: Build Semgrep HTML report
+        if: always() && hashFiles('semgrep.sarif') != ''
+        run: |
+          python3 scripts/security/sarif-to-html.py \
+            --input semgrep.sarif \
+            --json-input semgrep-results.json \
+            --html semgrep-report.html
+
+      - name: Upload Semgrep results to S3
+        if: always()
+        run: |
+          [ -f semgrep.sarif ]        && aws s3 cp semgrep.sarif         "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-results.sarif" --content-type "application/sarif+json"
+          [ -f semgrep-results.json ] && aws s3 cp semgrep-results.json  "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-results.json"  --content-type "application/json"
+          [ -f semgrep-cli.txt ]      && aws s3 cp semgrep-cli.txt       "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-cli.txt"       --content-type "text/plain; charset=utf-8"
+          [ -f semgrep-report.html ]         && aws s3 cp semgrep-report.html         "s3://quizizz-platform/${SCAN_S3_PREFIX}/semgrep-report.html"         --content-type "text/html; charset=utf-8"
