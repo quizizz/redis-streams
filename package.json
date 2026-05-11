@@ -1,7 +1,7 @@
 {
   "name": "@quizizz/redis-streams",
-  "version": "1.0.0",
-  "description": "Redis Streams transport library — producer, consumer, and dual-transport routing layer",
+  "version": "1.0.1",
+  "description": "Redis Streams library — producer and consumer for Redis Streams messaging",
   "main": "src/index.js",
   "engines": {
     "node": ">=16"
